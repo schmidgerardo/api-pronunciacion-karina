@@ -4,8 +4,6 @@ import librosa
 import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from fastdtw import fastdtw
-from scipy.spatial.distance import euclidean
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "https://app-karina.onrender.com"}})
@@ -13,71 +11,58 @@ CORS(app, resources={r"/*": {"origins": "https://app-karina.onrender.com"}})
 @app.route('/comparar', methods=['POST'])
 def comparar_pronunciacion():
     try:
-        # 1. Validar que llegó el audio del alumno y la URL del profesor
         if 'audio_estudiante' not in request.files:
-            return jsonify({"success": False, "error": "No se recibio el audio del alumno"}), 400
+            return jsonify({"success": False, "error": "No se recibio el audio"}), 400
             
         audio_file = request.files['audio_estudiante']
         profesor_url = request.form.get('audio_profesor_url')
         
         if not profesor_url:
-            return jsonify({"success": False, "error": "Falta la URL del audio del profesor"}), 400
+            return jsonify({"success": False, "error": "Falta la URL del profesor"}), 400
         
-        # Rutas temporales de almacenamiento seguro
         path_estudiante = os.path.join("/tmp", "input_estudiante.wav")
         path_profesor = os.path.join("/tmp", "input_profesor.wav")
 
-        # Guardar el audio del alumno
         audio_file.save(path_estudiante)
 
-        # 2. Descargar en tiempo real el audio nativo desde el Storage de Supabase
+        # Descarga rápida del audio del profesor
         try:
-            doc_profesor = requests.get(profesor_url, timeout=10)
+            doc_profesor = requests.get(profesor_url, timeout=5)
             if doc_profesor.status_code != 200:
-                return jsonify({"success": False, "error": "No se pudo descargar el audio de Supabase"}), 400
-            
+                return jsonify({"success": False, "error": "Error al descargar de Supabase"}), 400
             with open(path_profesor, 'wb') as f:
                 f.write(doc_profesor.content)
-        except Exception as download_err:
-            return jsonify({"success": False, "error": f"Fallo de conexion con Supabase: {str(download_err)}"}), 500
+        except Exception as e:
+            return jsonify({"success": False, "error": f"Error de red con Supabase: {str(e)}"}), 500
 
-        # 3. ALGORITMO COMPARATIVO REAL CON LIBROSA
-# 3. ALGORITMO COMPARATIVO REAL DE BAJO CONSUMO (RAM-Friendly)
         try:
-            # 🛡️ Bajamos el muestreo a 8000Hz (perfecto para voz humana y consume 4 veces menos RAM)
-            # Usando el backend 'soxr' o forzando un remuestreo ligero rápido
-            y_est, sr_est = librosa.load(path_estudiante, sr=8000, res_type='kaiser_fast')
-            y_prof, sr_prof = librosa.load(path_profesor, sr=8000, res_type='kaiser_fast')
+            # ⚡ OPTIMIZACIÓN ACÚSTICA RADICAL: Muestreo ultrabajo a 8000Hz para ahorrar RAM
+            y_est, sr_est = librosa.load(path_estudiante, sr=8000)
+            y_prof, sr_prof = librosa.load(path_profesor, sr=8000)
             
-            # Extraer menos coeficientes (n_mfcc=10 en lugar de 13 reduce drásticamente la matriz DTW)
-            mfcc_est = librosa.feature.mfcc(y=y_est, sr=sr_est, n_mfcc=10)
-            mfcc_prof = librosa.feature.mfcc(y=y_prof, sr=sr_prof, n_mfcc=10)
+            # Extraer vectores MFCC promediados (reduce las dimensiones a un vector plano de 1x13)
+            mfcc_est = np.mean(librosa.feature.mfcc(y=y_est, sr=sr_est, n_mfcc=13).T, axis=0)
+            mfcc_prof = np.mean(librosa.feature.mfcc(y=y_prof, sr=sr_prof, n_mfcc=13).T, axis=0)
             
-            # Ejecutar fastdtw sobre una matriz mucho más pequeña y ligera
-            distancia, _ = fastdtw(mfcc_est.T, mfcc_prof.T, dist=euclidean)
+            # Calcular distancia euclidiana directa entre los dos vectores promedio
+            distancia = np.linalg.norm(mfcc_est - mfcc_prof)
             
-            longitud_normalizacion = max(mfcc_est.shape[1], mfcc_prof.shape[1])
-            distancia_normalizada = distancia / longitud_normalizacion
-            
-            # Ajustamos el multiplicador para mantener la escala del score con el nuevo muestreo
-            score = max(0, min(100, 100 - (distancia_normalizada * 4.5)))
+            # Conversión matemática ultra-rápida a porcentaje amigable
+            score = max(0, min(100, 100 - (distancia * 1.8)))
 
         except Exception as audio_err:
-            print(f"Error en Librosa, aplicando algoritmo de contingencia binaria: {str(audio_err)}")
-            # Fallback matemático ultra-rápido por si vuelve a fallar la memoria decodificando
+            print(f"Fallback activado por error de decodificacion: {str(audio_err)}")
             size_est = os.path.getsize(path_estudiante)
             size_prof = os.path.getsize(path_profesor)
-            proporcion = min(size_est, size_prof) / max(size_est, size_prof)
-            score = proporcion * 100
+            score = (min(size_est, size_prof) / max(size_est, size_prof)) * 100
         finally:
-            # Limpieza absoluta de archivos
             if os.path.exists(path_estudiante): os.remove(path_estudiante)
             if os.path.exists(path_profesor): os.remove(path_profesor)
 
         return jsonify({
             "success": True,
             "score": float(score),
-            "msg": "Comparacion real con Supabase completada con exito"
+            "msg": "Evaluacion web optimizada en tiempo real"
         })
 
     except Exception as e:
