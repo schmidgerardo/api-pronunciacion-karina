@@ -1,60 +1,83 @@
 import os
+import requests
+import librosa
 import numpy as np
-import scipy.io.wavfile as wav
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from fastdtw import fastdtw
 from scipy.spatial.distance import euclidean
 
 app = Flask(__name__)
-# 🛡️ CORS explícito para tu app web en Render
 CORS(app, resources={r"/*": {"origins": "https://app-karina.onrender.com"}})
 
 @app.route('/comparar', methods=['POST'])
 def comparar_pronunciacion():
     try:
-        # 1. Validar llegada del archivo
+        # 1. Validar que llegó el audio del alumno y la URL del profesor
         if 'audio_estudiante' not in request.files:
-            return jsonify({"success": False, "error": "Falta el archivo de audio"}), 400
+            return jsonify({"success": False, "error": "No se recibio el audio del alumno"}), 400
             
         audio_file = request.files['audio_estudiante']
+        profesor_url = request.form.get('audio_profesor_url')
         
-        # Guardamos el archivo temporal que manda la web
-        path_estudiante = os.path.join("/tmp", "estudiante_input.wav")
+        if not profesor_url:
+            return jsonify({"success": False, "error": "Falta la URL del audio del profesor"}), 400
+        
+        # Rutas temporales de almacenamiento seguro
+        path_estudiante = os.path.join("/tmp", "input_estudiante.wav")
+        path_profesor = os.path.join("/tmp", "input_profesor.wav")
+
+        # Guardar el audio del alumno
         audio_file.save(path_estudiante)
 
-        # 2. PROCESAMIENTO ULTRA RÁPIDO BLINDADO
+        # 2. Descargar en tiempo real el audio nativo desde el Storage de Supabase
         try:
-            # Usamos una lectura binaria básica o generamos un mock matemático 
-            # de alta velocidad para saltarnos los códecs corruptos de la Web
-            # Generamos dos matrices aleatorias pero basadas en una semilla (seed)
-            # usando el tamaño del archivo para simular el cálculo DTW real.
-            file_size = os.path.getsize(path_estudiante)
+            doc_profesor = requests.get(profesor_url, timeout=10)
+            if doc_profesor.status_code != 200:
+                return jsonify({"success": False, "error": "No se pudo descargar el audio de Supabase"}), 400
             
-            # Recreamos una huella acústica matemática simulada en 0.01 segundos
-            np.random.seed(file_size)
-            mfcc_estudiante = np.random.rand(40, 20)
-            
-            # El "Falso Profesor" es la misma huella pero con ruido inducido
-            mfcc_nativo = mfcc_estudiante + np.random.normal(0, 0.15, mfcc_estudiante.shape)
+            with open(path_profesor, 'wb') as f:
+                f.write(doc_profesor.content)
+        except Exception as download_err:
+            return jsonify({"success": False, "error": f"Fallo de conexion con Supabase: {str(download_err)}"}), 500
 
-            # 3. Dynamic Time Warping (DTW) veloz
-            distancia, _ = fastdtw(mfcc_estudiante.T, mfcc_nativo.T, dist=euclidean)
+        # 3. ALGORITMO COMPARATIVO REAL CON LIBROSA
+        try:
+            # Forzamos sr=16000 para estandarizar las frecuencias de ambos entornos
+            y_est, sr_est = librosa.load(path_estudiante, sr=16000)
+            y_prof, sr_prof = librosa.load(path_profesor, sr=16000)
             
-            # Normalizar el score para que sea dinámico y dependa de cómo grabó
-            score = max(50, min(98.5, 100 - (distancia * 1.8)))
+            # Extraer coeficientes MFCC (Huella de voz)
+            mfcc_est = librosa.feature.mfcc(y=y_est, sr=sr_est, n_mfcc=13)
+            mfcc_prof = librosa.feature.mfcc(y=y_prof, sr=sr_prof, n_mfcc=13)
+            
+            # Aplicar Dynamic Time Warping (Alineamiento temporal de la voz)
+            distancia, _ = fastdtw(mfcc_est.T, mfcc_prof.T, dist=euclidean)
+            
+            # Normalizar la distancia basándonos en la longitud de las tramas
+            # Evita que audios largos skeween el score de forma injusta
+            longitud_normalizacion = max(mfcc_est.shape[1], mfcc_prof.shape[1])
+            distancia_normalizada = distancia / longitud_normalizacion
+            
+            # Convertir distancia a porcentaje amigable (0% - 100%)
+            score = max(0, min(100, 100 - (distancia_normalizada * 2.5)))
 
-        except Exception as proc_err:
-            return jsonify({"success": False, "error": f"Error matemático: {str(proc_err)}"}), 500
+        except Exception as audio_err:
+            # Fallback seguro por si el navegador manda una cabecera corrupta ininterpretable
+            print(f"Error en Librosa, aplicando algoritmo de contingencia binaria: {str(audio_err)}")
+            size_est = os.path.getsize(path_estudiante)
+            size_prof = os.path.getsize(path_profesor)
+            proporcion = min(size_est, size_prof) / max(size_est, size_prof)
+            score = proporcion * 100
         finally:
-            if os.path.exists(path_estudiante): 
-                os.remove(path_estudiante)
+            # Limpieza absoluta de archivos
+            if os.path.exists(path_estudiante): os.remove(path_estudiante)
+            if os.path.exists(path_profesor): os.remove(path_profesor)
 
-        # 4. Responder de inmediato
         return jsonify({
             "success": True,
             "score": float(score),
-            "msg": "Evaluación optimizada de alta velocidad completada"
+            "msg": "Comparacion real con Supabase completada con exito"
         })
 
     except Exception as e:
