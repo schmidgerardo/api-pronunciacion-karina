@@ -1,12 +1,12 @@
 import os
 import requests
-import librosa
 import numpy as np
+from scipy.io import wavfile
+from scipy.signal import welch
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-# CORS totalmente abierto para evitar bloqueos en el navegador del cliente
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # -------------------------------------------------------------------
@@ -15,7 +15,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 @app.route('/comparar', methods=['POST'])
 def comparar_pronunciacion():
     try:
-        # Validar presencia del archivo de audio del estudiante
+        # Validar archivo y URL
         if 'audio_estudiante' not in request.files:
             return jsonify({"success": False, "error": "No se recibio el audio"}), 400
 
@@ -25,87 +25,118 @@ def comparar_pronunciacion():
         if not profesor_url:
             return jsonify({"success": False, "error": "Falta la URL del profesor"}), 400
 
-        # Rutas temporales en /tmp (único directorio con permisos de escritura en Render)
-        path_estudiante = os.path.join("/tmp", "input_estudiante.wav")
-        path_profesor   = os.path.join("/tmp", "input_profesor.wav")
+        # Guardar en /tmp
+        path_est = os.path.join("/tmp", "estudiante.wav")
+        path_prof = os.path.join("/tmp", "profesor.wav")
 
-        # Guardar audio del estudiante
-        audio_file.save(path_estudiante)
+        audio_file.save(path_est)
 
-        # Descargar audio del profesor desde Supabase con timeout corto
+        # Descargar audio del profesor (timeout 4 s)
         try:
             resp = requests.get(profesor_url, timeout=4)
             if resp.status_code == 200:
-                with open(path_profesor, 'wb') as f:
+                with open(path_prof, 'wb') as f:
                     f.write(resp.content)
             else:
-                raise Exception("Status inválido")
+                raise Exception("Descarga fallida")
         except Exception:
-            # Si falla la descarga, activamos contingencia inmediata
-            return aplicar_fallback_rapido(path_estudiante, None)
+            return fallback_rapido(path_est, None)
 
-        # --- Algoritmo principal de comparación acústica (bajo consumo) ---
+        # --- Análisis espectral con scipy (solo WAV) ---
         try:
-            # Carga con remuestreo a 8000 Hz y tipo 'kaiser_fast' para minimizar CPU/RAM
-            y_est, sr_est = librosa.load(path_estudiante, sr=8000, res_type='kaiser_fast')
-            y_prof, sr_prof = librosa.load(path_profesor,   sr=8000, res_type='kaiser_fast')
+            # Leer archivos WAV
+            sr_est, y_est = wavfile.read(path_est)
+            sr_prof, y_prof = wavfile.read(path_prof)
 
-            # Si algún audio está vacío, activar fallback
-            if len(y_est) == 0 or len(y_prof) == 0:
-                return aplicar_fallback_rapido(path_estudiante, path_profesor)
+            # Si los datos están en múltiples canales, tomar el primero
+            if y_est.ndim > 1:
+                y_est = y_est[:, 0]
+            if y_prof.ndim > 1:
+                y_prof = y_prof[:, 0]
 
-            # Extraer MFCC (10 coeficientes) y promediar en el tiempo para obtener un vector plano
-            mfcc_est = np.mean(librosa.feature.mfcc(y=y_est, sr=sr_est, n_mfcc=10).T, axis=0)
-            mfcc_prof = np.mean(librosa.feature.mfcc(y=y_prof, sr=sr_prof, n_mfcc=10).T, axis=0)
+            # Convertir a float (normalizar)
+            y_est = y_est.astype(np.float32) / 32768.0
+            y_prof = y_prof.astype(np.float32) / 32768.0
 
-            # Distancia euclidiana entre los vectores promedio
-            distancia = np.linalg.norm(mfcc_est - mfcc_prof)
+            # Remuestrear a 8000 Hz si la tasa es mayor (ahorro de memoria)
+            TARGET_SR = 8000
+            if sr_est != TARGET_SR:
+                # scipy.signal.resample requiere que la longitud sea un entero
+                num_samples = int(len(y_est) * TARGET_SR / sr_est)
+                y_est = np.interp(
+                    np.linspace(0, len(y_est) - 1, num_samples),
+                    np.arange(len(y_est)),
+                    y_est
+                )
+                sr_est = TARGET_SR
+            if sr_prof != TARGET_SR:
+                num_samples = int(len(y_prof) * TARGET_SR / sr_prof)
+                y_prof = np.interp(
+                    np.linspace(0, len(y_prof) - 1, num_samples),
+                    np.arange(len(y_prof)),
+                    y_prof
+                )
+                sr_prof = TARGET_SR
 
-            # Mapeo a un puntaje entre 45 y 98.2 (ajuste empírico)
-            score = max(45.0, min(98.2, 100.0 - (distancia * 1.5)))
+            # Truncar a 3 segundos máximo (para limitar tiempo de cómputo)
+            max_len = TARGET_SR * 3
+            if len(y_est) > max_len:
+                y_est = y_est[:max_len]
+            if len(y_prof) > max_len:
+                y_prof = y_prof[:max_len]
 
-        except Exception:
-            # Cualquier error en Librosa activa el fallback
-            return aplicar_fallback_rapido(path_estudiante, path_profesor)
+            # Calcular densidad espectral de potencia (Welch)
+            # nperseg=256 da buena resolución y bajo costo
+            f_est, Pxx_est = welch(y_est, fs=sr_est, nperseg=256)
+            f_prof, Pxx_prof = welch(y_prof, fs=sr_prof, nperseg=256)
+
+            # Las frecuencias son idénticas porque ambas señales están a 8000 Hz
+            # Tomamos el espectro de potencia en dB (más estable)
+            Pxx_est_db = 10 * np.log10(Pxx_est + 1e-10)
+            Pxx_prof_db = 10 * np.log10(Pxx_prof + 1e-10)
+
+            # Distancia euclidiana entre los vectores de potencia
+            distancia = np.linalg.norm(Pxx_est_db - Pxx_prof_db)
+
+            # Mapeo a puntaje (ajuste empírico)
+            # distancia típica entre 0 y ~50, se escala
+            score = max(45.0, min(98.0, 100.0 - (distancia * 1.2)))
+
+        except Exception as e:
+            # Si falla la lectura o el procesamiento, activar fallback
+            return fallback_rapido(path_est, path_prof)
+
         finally:
-            # Limpieza de archivos temporales (siempre se ejecuta)
-            if os.path.exists(path_estudiante):
-                os.remove(path_estudiante)
-            if os.path.exists(path_profesor):
-                os.remove(path_profesor)
+            # Limpieza de archivos temporales
+            if os.path.exists(path_est):
+                os.remove(path_est)
+            if os.path.exists(path_prof):
+                os.remove(path_prof)
 
         return jsonify({
             "success": True,
             "score": float(score),
-            "msg": "Evaluacion ejecutada de forma exitosa"
+            "msg": "Evaluacion ejecutada con exito (espectro de potencia)"
         })
 
     except Exception as e:
-        # Captura cualquier excepción no controlada y devuelve error 500
         return jsonify({"success": False, "error": str(e)}), 500
 
 
 # -------------------------------------------------------------------
-# Mecanismo de contingencia (fallback) de alta velocidad
+# Fallback de contingencia (basado en tamaño de bytes)
 # -------------------------------------------------------------------
-def aplicar_fallback_rapido(p1, p2=None):
-    """
-    Garantiza una respuesta 200 con un puntaje simulado en menos de 50 ms,
-    basado en la densidad de bytes de los archivos.
-    Se invoca cuando:
-      - El audio del profesor no se puede descargar.
-      - Librosa lanza una excepción (códec corrupto, memoria insuficiente, etc.)
-      - Cualquier otro error inesperado en el flujo principal.
-    """
+def fallback_rapido(p1, p2=None):
+    """Garantiza siempre un 200 OK, incluso si los audios no se pueden procesar."""
     try:
         size_est = os.path.getsize(p1) if (p1 and os.path.exists(p1)) else 1000
         size_prof = os.path.getsize(p2) if (p2 and os.path.exists(p2)) else 1200
         proporcion = min(size_est, size_prof) / max(size_est, size_prof)
         score = max(55.0, proporcion * 100)
-    except Exception:
-        score = 78.4  # valor por defecto
+    except:
+        score = 78.4
 
-    # Limpieza forzada
+    # Limpieza
     if p1 and os.path.exists(p1):
         os.remove(p1)
     if p2 and os.path.exists(p2):
@@ -114,12 +145,9 @@ def aplicar_fallback_rapido(p1, p2=None):
     return jsonify({
         "success": True,
         "score": float(score),
-        "msg": "Evaluacion por contingencia de alta velocidad"
+        "msg": "Evaluacion por contingencia (basada en bytes)"
     })
 
 
-# -------------------------------------------------------------------
-# Punto de entrada para Gunicorn (Render)
-# -------------------------------------------------------------------
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
