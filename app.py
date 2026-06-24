@@ -15,7 +15,6 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 @app.route('/comparar', methods=['POST'])
 def comparar_pronunciacion():
     try:
-        # Validar archivo y URL
         if 'audio_estudiante' not in request.files:
             return jsonify({"success": False, "error": "No se recibio el audio"}), 400
 
@@ -25,13 +24,12 @@ def comparar_pronunciacion():
         if not profesor_url:
             return jsonify({"success": False, "error": "Falta la URL del profesor"}), 400
 
-        # Guardar en /tmp
         path_est = os.path.join("/tmp", "estudiante.wav")
         path_prof = os.path.join("/tmp", "profesor.wav")
 
         audio_file.save(path_est)
 
-        # Descargar audio del profesor (timeout 4 s)
+        # Descargar audio del profesor
         try:
             resp = requests.get(profesor_url, timeout=4)
             if resp.status_code == 200:
@@ -44,21 +42,17 @@ def comparar_pronunciacion():
 
         # --- Análisis espectral con scipy (solo WAV) ---
         try:
-            # Leer archivos WAV
             sr_est, y_est = wavfile.read(path_est)
             sr_prof, y_prof = wavfile.read(path_prof)
 
-            # Si los datos están en múltiples canales, tomar el primero
             if y_est.ndim > 1:
                 y_est = y_est[:, 0]
             if y_prof.ndim > 1:
                 y_prof = y_prof[:, 0]
 
-            # Convertir a float (normalizar)
             y_est = y_est.astype(np.float32) / 32768.0
             y_prof = y_prof.astype(np.float32) / 32768.0
 
-            # Remuestrear a 8000 Hz si la tasa es mayor (ahorro de memoria)
             TARGET_SR = 8000
             if sr_est != TARGET_SR:
                 num_samples = int(len(y_est) * TARGET_SR / sr_est)
@@ -77,14 +71,12 @@ def comparar_pronunciacion():
                 )
                 sr_prof = TARGET_SR
 
-            # Truncar a 3 segundos máximo (para limitar tiempo de cómputo)
             max_len = TARGET_SR * 3
             if len(y_est) > max_len:
                 y_est = y_est[:max_len]
             if len(y_prof) > max_len:
                 y_prof = y_prof[:max_len]
 
-            # Calcular densidad espectral de potencia (Welch)
             f_est, Pxx_est = welch(y_est, fs=sr_est, nperseg=256)
             f_prof, Pxx_prof = welch(y_prof, fs=sr_prof, nperseg=256)
 
@@ -92,16 +84,13 @@ def comparar_pronunciacion():
             Pxx_prof_db = 10 * np.log10(Pxx_prof + 1e-10)
 
             distancia = np.linalg.norm(Pxx_est_db - Pxx_prof_db)
-
-            # Mapeo a puntaje
             score = max(45.0, min(98.0, 100.0 - (distancia * 1.2)))
 
-        except Exception as e:
-            # Cualquier error (incluido el formato no WAV) activa el fallback inmediato
+        except Exception:
+            # Cualquier error (formato no WAV, datos corruptos, etc.) activa fallback
             return fallback_rapido(path_est, path_prof)
 
         finally:
-            # Limpieza de archivos temporales
             if os.path.exists(path_est):
                 os.remove(path_est)
             if os.path.exists(path_prof):
@@ -117,9 +106,6 @@ def comparar_pronunciacion():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-# -------------------------------------------------------------------
-# Fallback de contingencia (basado en tamaño de bytes)
-# -------------------------------------------------------------------
 def fallback_rapido(p1, p2=None):
     """Garantiza siempre un 200 OK, incluso si los audios no se pueden procesar."""
     try:
@@ -130,7 +116,6 @@ def fallback_rapido(p1, p2=None):
     except:
         score = 78.4
 
-    # Limpieza
     if p1 and os.path.exists(p1):
         os.remove(p1)
     if p2 and os.path.exists(p2):
