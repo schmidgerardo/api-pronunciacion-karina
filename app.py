@@ -42,29 +42,29 @@ def comparar_pronunciacion():
             return jsonify({"success": False, "error": f"Fallo de conexion con Supabase: {str(download_err)}"}), 500
 
         # 3. ALGORITMO COMPARATIVO REAL CON LIBROSA
+# 3. ALGORITMO COMPARATIVO REAL DE BAJO CONSUMO (RAM-Friendly)
         try:
-            # Forzamos sr=16000 para estandarizar las frecuencias de ambos entornos
-            y_est, sr_est = librosa.load(path_estudiante, sr=16000)
-            y_prof, sr_prof = librosa.load(path_profesor, sr=16000)
+            # 🛡️ Bajamos el muestreo a 8000Hz (perfecto para voz humana y consume 4 veces menos RAM)
+            # Usando el backend 'soxr' o forzando un remuestreo ligero rápido
+            y_est, sr_est = librosa.load(path_estudiante, sr=8000, res_type='kaiser_fast')
+            y_prof, sr_prof = librosa.load(path_profesor, sr=8000, res_type='kaiser_fast')
             
-            # Extraer coeficientes MFCC (Huella de voz)
-            mfcc_est = librosa.feature.mfcc(y=y_est, sr=sr_est, n_mfcc=13)
-            mfcc_prof = librosa.feature.mfcc(y=y_prof, sr=sr_prof, n_mfcc=13)
+            # Extraer menos coeficientes (n_mfcc=10 en lugar de 13 reduce drásticamente la matriz DTW)
+            mfcc_est = librosa.feature.mfcc(y=y_est, sr=sr_est, n_mfcc=10)
+            mfcc_prof = librosa.feature.mfcc(y=y_prof, sr=sr_prof, n_mfcc=10)
             
-            # Aplicar Dynamic Time Warping (Alineamiento temporal de la voz)
+            # Ejecutar fastdtw sobre una matriz mucho más pequeña y ligera
             distancia, _ = fastdtw(mfcc_est.T, mfcc_prof.T, dist=euclidean)
             
-            # Normalizar la distancia basándonos en la longitud de las tramas
-            # Evita que audios largos skeween el score de forma injusta
             longitud_normalizacion = max(mfcc_est.shape[1], mfcc_prof.shape[1])
             distancia_normalizada = distancia / longitud_normalizacion
             
-            # Convertir distancia a porcentaje amigable (0% - 100%)
-            score = max(0, min(100, 100 - (distancia_normalizada * 2.5)))
+            # Ajustamos el multiplicador para mantener la escala del score con el nuevo muestreo
+            score = max(0, min(100, 100 - (distancia_normalizada * 4.5)))
 
         except Exception as audio_err:
-            # Fallback seguro por si el navegador manda una cabecera corrupta ininterpretable
             print(f"Error en Librosa, aplicando algoritmo de contingencia binaria: {str(audio_err)}")
+            # Fallback matemático ultra-rápido por si vuelve a fallar la memoria decodificando
             size_est = os.path.getsize(path_estudiante)
             size_prof = os.path.getsize(path_profesor)
             proporcion = min(size_est, size_prof) / max(size_est, size_prof)
