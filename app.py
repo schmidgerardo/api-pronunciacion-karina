@@ -61,7 +61,6 @@ def comparar_pronunciacion():
             # Remuestrear a 8000 Hz si la tasa es mayor (ahorro de memoria)
             TARGET_SR = 8000
             if sr_est != TARGET_SR:
-                # scipy.signal.resample requiere que la longitud sea un entero
                 num_samples = int(len(y_est) * TARGET_SR / sr_est)
                 y_est = np.interp(
                     np.linspace(0, len(y_est) - 1, num_samples),
@@ -86,24 +85,19 @@ def comparar_pronunciacion():
                 y_prof = y_prof[:max_len]
 
             # Calcular densidad espectral de potencia (Welch)
-            # nperseg=256 da buena resolución y bajo costo
             f_est, Pxx_est = welch(y_est, fs=sr_est, nperseg=256)
             f_prof, Pxx_prof = welch(y_prof, fs=sr_prof, nperseg=256)
 
-            # Las frecuencias son idénticas porque ambas señales están a 8000 Hz
-            # Tomamos el espectro de potencia en dB (más estable)
             Pxx_est_db = 10 * np.log10(Pxx_est + 1e-10)
             Pxx_prof_db = 10 * np.log10(Pxx_prof + 1e-10)
 
-            # Distancia euclidiana entre los vectores de potencia
             distancia = np.linalg.norm(Pxx_est_db - Pxx_prof_db)
 
-            # Mapeo a puntaje (ajuste empírico)
-            # distancia típica entre 0 y ~50, se escala
+            # Mapeo a puntaje
             score = max(45.0, min(98.0, 100.0 - (distancia * 1.2)))
 
         except Exception as e:
-            # Si falla la lectura o el procesamiento, activar fallback
+            # Cualquier error (incluido el formato no WAV) activa el fallback inmediato
             return fallback_rapido(path_est, path_prof)
 
         finally:
