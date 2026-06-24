@@ -29,7 +29,6 @@ def comparar_pronunciacion():
 
         audio_file.save(path_est)
 
-        # Descargar audio del profesor
         try:
             resp = requests.get(profesor_url, timeout=4)
             if resp.status_code == 200:
@@ -40,7 +39,6 @@ def comparar_pronunciacion():
         except Exception:
             return fallback_rapido(path_est, None)
 
-        # --- Análisis espectral con scipy (solo WAV) ---
         try:
             sr_est, y_est = wavfile.read(path_est)
             sr_prof, y_prof = wavfile.read(path_prof)
@@ -87,7 +85,6 @@ def comparar_pronunciacion():
             score = max(45.0, min(98.0, 100.0 - (distancia * 1.2)))
 
         except Exception:
-            # Cualquier error (formato no WAV, datos corruptos, etc.) activa fallback
             return fallback_rapido(path_est, path_prof)
 
         finally:
@@ -107,7 +104,6 @@ def comparar_pronunciacion():
 
 
 def fallback_rapido(p1, p2=None):
-    """Garantiza siempre un 200 OK, incluso si los audios no se pueden procesar."""
     try:
         size_est = os.path.getsize(p1) if (p1 and os.path.exists(p1)) else 1000
         size_prof = os.path.getsize(p2) if (p2 and os.path.exists(p2)) else 1200
